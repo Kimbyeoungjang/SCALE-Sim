@@ -183,11 +183,8 @@ class operand_matrix(object):
         if self.config.sparsity_support:
             if self.config.sparsity_optimized_mapping is False:
                 sparse_row = self.sparse_filter_array[:, 0].T
-                self.ifmap_addr_matrix *= sparse_row
-                non_zero_columns = np.any(self.ifmap_addr_matrix != 0, axis=0)
-                if self.ifmap_addr_matrix.shape[0] == 1 and self.config.ifmap_offset == 0:
-                    non_zero_columns[0] = True # Always keep the first column
-                self.ifmap_addr_matrix = self.ifmap_addr_matrix[:, non_zero_columns]
+                non_pruned_columns = sparse_row.astype(bool)
+                self.ifmap_addr_matrix = self.ifmap_addr_matrix[:, non_pruned_columns]
   
         return 0
 
@@ -295,7 +292,11 @@ class operand_matrix(object):
                     columns.append(column_values)
                 self.sparse_filter_array = np.column_stack(columns)
 
-            self.filter_addr_matrix = np.multiply(self.filter_addr_matrix, self.sparse_filter_array)
+            self.filter_addr_matrix = np.where(
+                self.sparse_filter_array == 1,
+                self.filter_addr_matrix,
+                -1
+            )
 
             if self.config.sparsity_optimized_mapping is False:
                 sparse_filter_matrix = []
@@ -305,11 +306,11 @@ class operand_matrix(object):
 
                     for i in range(0, self.filter_addr_matrix.shape[0], self.sparsity_ratio_M):
                         block = col_data[i : i+self.sparsity_ratio_M]
-                        block_nonzero = block[block != 0]
+                        block_nonzero = block[block != -1]
 
                         if len(block_nonzero) < self.sparsity_ratio_N:
                             padding_num = self.sparsity_ratio_N - len(block_nonzero)
-                            block_nonzero = np.pad(block_nonzero, (0, padding_num), constant_values=0)
+                            block_nonzero = np.pad(block_nonzero, (0, padding_num), constant_values=-1)
                         elif len(block_nonzero) > self.sparsity_ratio_N:
                             assert len(block_nonzero) <= self.sparsity_ratio_N, (
                                 f"Excess non-zero entries ({len(block_nonzero)}) with sparsity ratio "
@@ -322,7 +323,7 @@ class operand_matrix(object):
 
                 sparse_filter_matrix = np.array(sparse_filter_matrix).T
                 
-                while sparse_filter_matrix.shape[0] > 0 and np.all(sparse_filter_matrix[-1] == 0):
+                while sparse_filter_matrix.shape[0] > 0 and np.all(sparse_filter_matrix[-1] == -1):
                     sparse_filter_matrix = sparse_filter_matrix[:-1]
                 self.filter_addr_matrix = sparse_filter_matrix
             else:
@@ -332,22 +333,22 @@ class operand_matrix(object):
                     padding_rows = (2 * self.config.sparsity_block_size) - remainder
                     self.filter_addr_matrix = np.vstack([
                         self.filter_addr_matrix,
-                        np.zeros((padding_rows, self.filter_addr_matrix.shape[1]), dtype=int)
+                        np.full((padding_rows, self.filter_addr_matrix.shape[1]), -1, dtype=int)
                     ])
 
-                sparse_filter_matrix = np.zeros((self.filter_addr_matrix.shape[0] // 2, self.filter_addr_matrix.shape[1]), dtype=int)
+                sparse_filter_matrix = np.full((self.filter_addr_matrix.shape[0] // 2, self.filter_addr_matrix.shape[1]), -1, dtype=int)
 
                 for col in range(self.filter_addr_matrix.shape[1]):
                     compressed_col = []  # To store the compressed column values
                     for start_row in range(0, self.filter_addr_matrix.shape[0], self.config.sparsity_block_size * 2):
                         block1 = self.filter_addr_matrix[start_row : start_row + self.config.sparsity_block_size, col]
-                        padded_block1 = np.zeros(self.config.sparsity_block_size // 2, dtype=int)
-                        non_zero_block1 = block1[block1 != 0]
+                        padded_block1 = np.full(self.config.sparsity_block_size // 2, -1, dtype=int)
+                        non_zero_block1 = block1[block1 != -1]
                         padded_block1[:min(len(non_zero_block1), self.config.sparsity_block_size // 2)] = non_zero_block1[: self.config.sparsity_block_size // 2]
 
                         block2 = self.filter_addr_matrix[start_row + self.config.sparsity_block_size : start_row + self.config.sparsity_block_size * 2, col]
-                        padded_block2 = np.zeros(self.config.sparsity_block_size // 2, dtype=int)
-                        non_zero_block2 = block2[block2 != 0]
+                        padded_block2 = np.full(self.config.sparsity_block_size // 2, -1, dtype=int)
+                        non_zero_block2 = block2[block2 != -1]
                         padded_block2[:min(len(non_zero_block2), self.config.sparsity_block_size // 2)] = non_zero_block2[: self.config.sparsity_block_size // 2]
 
                         combined_block = np.concatenate([padded_block1, padded_block2])
@@ -359,11 +360,6 @@ class operand_matrix(object):
 
                 # Replace the original matrix with the compressed matrix
                 self.filter_addr_matrix = sparse_filter_matrix
-
-                first_element = self.filter_addr_matrix[0][0]
-                self.filter_addr_matrix[:][self.filter_addr_matrix[:] == 0] = -1
-                if self.config.filter_offset == 0 and first_element == 0:
-                    self.filter_addr_matrix[0][0] = 0
 
         return 0
 
@@ -437,14 +433,17 @@ class operand_matrix(object):
         #ifmap_intraline_factor = [2, 2, 16] # A given fixed dimension order
         #ifmap_intraline_order  = [0, 1, 2] # A given fixed dimension order
         #ifmap_interline_order  = [1+3, 2+3, 0+3] # A given fixed dimension order
-        ifmap_intraline_factor = self.layoututil.get_layer_ifmap_intraline_factor()
-        ifmap_intraline_order = self.layoututil.get_layer_ifmap_intraline_order()
-        ifmap_interline_order = self.layoututil.get_layer_ifmap_interline_order()
+        ifmap_intraline_factor = self.layoututil.get_layer_ifmap_intraline_factor(self.layer_id)
+        ifmap_intraline_order = self.layoututil.get_layer_ifmap_intraline_order(self.layer_id)
+        ifmap_interline_order = self.layoututil.get_layer_ifmap_interline_order(self.layer_id)
         
         # Sanity Checking
         assert np.prod(ifmap_intraline_factor) <= int(self.config.get_ifmap_sram_bandwidth())
 
-        ifmap_overall_data = np.arange(self.ifmap_rows * self.ifmap_cols * self.num_input_channels)
+        ifmap_overall_data = (
+            np.arange(self.ifmap_rows * self.ifmap_cols * self.num_input_channels)
+            + self.ifmap_offset
+        )
         
         # Reshape each dimension of ifmap to be a different index.
         ifmap_overall_data = ifmap_overall_data.reshape(self.ifmap_rows, self.ifmap_cols, self.num_input_channels)
@@ -566,9 +565,9 @@ class operand_matrix(object):
         # filter_intraline_factor = [4,16, 1, 1] # A given fixed dimension order
         # filter_intraline_order  = [3, 2, 1, 0] # A given fixed dimension order
         # filter_interline_order  = [0+4, 1+4, 2+4, 3+4] # A given fixed dimension order
-        filter_intraline_factor = self.layoututil.get_layer_filter_intraline_factor()
-        filter_intraline_order  = self.layoututil.get_layer_filter_intraline_order()
-        filter_interline_order  = self.layoututil.get_layer_filter_interline_order()
+        filter_intraline_factor = self.layoututil.get_layer_filter_intraline_factor(self.layer_id)
+        filter_intraline_order  = self.layoututil.get_layer_filter_intraline_order(self.layer_id)
+        filter_interline_order  = self.layoututil.get_layer_filter_interline_order(self.layer_id)
 
         # Sanity Checking
         assert np.prod(filter_intraline_factor) == int(self.config.get_filter_sram_bandwidth())
@@ -633,7 +632,6 @@ class operand_matrix(object):
            (filter_interline_order[0], filter_interline_order[1], filter_interline_order[2], filter_interline_order[3], 
             filter_intraline_order[0], filter_intraline_order[1], filter_intraline_order[2], filter_intraline_order[3]))
 
-        print(f"finalized filter.shape = {filter_overall_data_pad.shape}")
         return filter_overall_data_pad.reshape(1,-1)
     
     # function to get a part or the full ofmap operand

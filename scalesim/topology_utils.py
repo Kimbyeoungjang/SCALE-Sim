@@ -2,7 +2,15 @@
 This file contains the 'topologies' class that handles the topology files fed to SCALE_Sim tool.
 """
 
+import csv
 import math
+
+
+def _clean_csv_row(row):
+    cleaned = [cell.strip() for cell in row]
+    while cleaned and cleaned[-1] == "":
+        cleaned.pop()
+    return cleaned
 
 
 class topologies(object):
@@ -27,6 +35,13 @@ class topologies(object):
         self.df = ""
         self.current_toponame = ""
         self.layer_name = ""
+
+    def _is_invalid_layer_id(self, layer_id):
+        return (
+            not self.topo_load_flag
+            or layer_id < 0
+            or layer_id >= self.num_layers
+        )
 
     # reset topology parameters
     def reset(self):
@@ -83,19 +98,19 @@ class topologies(object):
         else:
             self.current_topo_name = self.topo_file_name
 
-        f = open(topofile, 'r')
-        first = True
+        with open(topofile, 'r', newline='') as f:
+            reader = csv.reader(f)
+            next(reader, None)
 
-        for row in f:
-            row = row.strip()
-            if first:
-                first = False
-                continue
-            elif row == '':
-                continue
-            else:
-                elems = row.split(',')[:-1]
-                assert len(elems) > 3, 'There should be at least 4 entries per row'
+            for row_num, row in enumerate(reader, start=2):
+                elems = _clean_csv_row(row)
+                if not elems:
+                    continue
+                if len(elems) < 4:
+                    raise ValueError(
+                        f"{topofile}:{row_num}: GEMM topology rows need at least "
+                        "Layer, M, N, K"
+                    )
                 layer_name = elems[0].strip()
                 m = elems[1].strip()
                 n = elems[2].strip()
@@ -104,6 +119,8 @@ class topologies(object):
                     # If sparsity ratio is missing in the topology file, consider the default ratio
                     elems.append("1:1")
                 sparsity_ratio = elems[4].strip().split(':')
+                if len(sparsity_ratio) != 2:
+                    raise ValueError(f"{topofile}:{row_num}: Invalid sparsity ratio '{elems[4]}'")
 
                 # Entries: layer name, Ifmap h, ifmap w, filter h, filter w, num_ch, num_filt,
                 #          stride h, stride w, N in N:M, M in N:M
@@ -130,13 +147,18 @@ class topologies(object):
         else:
             self.current_topo_name = self.topo_file_name
 
-        f = open(topofile, 'r')
-        for row in f:
-            row = row.strip()
-            if first or row == '':
-                first = False
-            else:
-                elems = row.split(',')[:-1]
+        with open(topofile, 'r', newline='') as f:
+            reader = csv.reader(f)
+            next(reader, None)
+            for row_num, row in enumerate(reader, start=2):
+                elems = _clean_csv_row(row)
+                if not elems:
+                    continue
+                if len(elems) < 8:
+                    raise ValueError(
+                        f"{topofile}:{row_num}: CONV topology rows need at least "
+                        "Layer, IFMAP H/W, Filter H/W, Channels, Num Filter, Stride"
+                    )
 
                 # Add the same stride in the col direction automatically
                 elems = elems[0:8] + [elems[7]] + elems[8:]
@@ -145,7 +167,10 @@ class topologies(object):
                 if len(elems) < 10:
                     # If sparsity ratio is missing in the topology file, consider the default ratio
                     elems.append("1:1")
-                sparsity_ratio = elems.pop().strip().split(':')
+                sparsity_text = elems.pop().strip()
+                sparsity_ratio = sparsity_text.split(':')
+                if len(sparsity_ratio) != 2:
+                    raise ValueError(f"{topofile}:{row_num}: Invalid sparsity ratio '{sparsity_text}'")
                 elems.append(sparsity_ratio[0])
                 elems.append(sparsity_ratio[1])
 
@@ -196,17 +221,15 @@ class topologies(object):
                     "Stride width"
                 ]
 
-        f = open(filename, 'w')
-        log = ",".join(header)
-        log += ",\n"
-        f.write(log)
-
-        for param_arr in self.topo_arrays:
-            log = ",".join([str(x) for x in param_arr])
+        with open(filename, 'w') as f:
+            log = ",".join(header)
             log += ",\n"
             f.write(log)
 
-        f.close()
+            for param_arr in self.topo_arrays:
+                log = ",".join([str(x) for x in param_arr])
+                log += ",\n"
+                f.write(log)
 
     # LEGACY
     def append_topo_arrays(self, layer_name, elems):
@@ -383,8 +406,9 @@ class topologies(object):
         Method to get the ifmap dimensions of the layer if available. If not, print an error
         message.
         """
-        if not (self.topo_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: topologies.get_layer_ifmap_dims: Invalid layer id")
+            return
 
         layer_params = self.topo_arrays[layer_id]
         return layer_params[1:3]    # Idx = 1, 2
@@ -395,8 +419,9 @@ class topologies(object):
         Method to get the filter dimensions of the layer if available. If not, print an error
         message.
         """
-        if not (self.topo_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: topologies.get_layer_ifmap_dims: Invalid layer id")
+            return
 
         layer_params = self.topo_arrays[layer_id]
         return layer_params[3:5]    # Idx = 3, 4
@@ -407,8 +432,9 @@ class topologies(object):
         Method to get the number of filters of the layer if available. If not, print an error
         message.
         """
-        if not (self.topo_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: topologies.get_layer_num_filter: Invalid layer id")
+            return
         layer_params = self.topo_arrays[layer_id]
         return layer_params[6]
 
@@ -418,8 +444,9 @@ class topologies(object):
         Method to get the number of channels of the layer if available. If not, print an error
         message.
         """
-        if not (self.topo_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: topologies.get_layer_num_filter: Invalid layer id")
+            return
         layer_params = self.topo_arrays[layer_id]
         return layer_params[5]
 
@@ -428,8 +455,9 @@ class topologies(object):
         """
         Method to get the strides of the layer if available. If not, print an error message.
         """
-        if not (self.topo_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: topologies.get_layer_strides: Invalid layer id")
+            return
 
         layer_params = self.topo_arrays[layer_id]
         return layer_params[7:9]
@@ -439,8 +467,9 @@ class topologies(object):
         """
         Method to get the sparsity ratio of the layer if available. If not, print an error message.
         """
-        if not (self.topo_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: topologies.get_layer_sparsity_ratio: Invalid layer id")
+            return
 
         layer_params = self.topo_arrays[layer_id]
         return layer_params[9:11]
@@ -451,8 +480,9 @@ class topologies(object):
         Method to get the convolution window size of the layer if available. If not, print an error
         message.
         """
-        if not (self.topo_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: topologies.get_layer_num_filter: Invalid layer id")
+            return
         if not self.topo_calc_hyper_param_flag:
             self.topo_calc_hyperparams()
         layer_calc_params = self.layers_calculated_hyperparams[layer_id]
@@ -464,8 +494,9 @@ class topologies(object):
         Method to get the number of ofmap pixels of the layer if available. If not, print an error
         message.
         """
-        if not (self.topo_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: topologies.get_layer_num_filter: Invalid layer id")
+            return
         if not self.topo_calc_hyper_param_flag:
             self.topo_calc_hyperparams()
         layer_calc_params = self.layers_calculated_hyperparams[layer_id]
@@ -479,8 +510,9 @@ class topologies(object):
         Method to get the ofmap dimensions of the layer if available. If not, print an error
         message.
         """
-        if not (self.topo_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: topologies.get_layer_ofmap_dims: Invalid layer id")
+            return
         if not self.topo_calc_hyper_param_flag:
             self.topo_calc_hyperparams()
         ofmap_dims = self.layers_calculated_hyperparams[layer_id][0:2]
@@ -491,7 +523,7 @@ class topologies(object):
         """
         Method to get the parameters of the layer if available. If not, print an error message.
         """
-        if not (self.topo_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: topologies.get_layer_params: Invalid layer id")
             return
         layer_params = self.topo_arrays[layer_id]
@@ -508,7 +540,7 @@ class topologies(object):
             return
         indx = -1
         for i in range(len(self.topo_arrays)):
-            if layer_name == self.topo_arrays[i]:
+            if layer_name == self.topo_arrays[i][0]:
                 indx = i
         if indx == -1:
             print("WARNING: Not found")
@@ -520,7 +552,7 @@ class topologies(object):
         Method to get the layer name from the given layer number if available. If not, print an
         error message.
         """
-        if not (self.topo_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: topologies.get_layer_name: Invalid layer id")
             return
 

@@ -10,6 +10,31 @@ from scalesim.layout_utils import layouts
 from scalesim.simulator import simulator
 
 
+def _validate_layout_matches_topology(topo_obj, layout_obj):
+    topo_names = topo_obj.get_layer_names()
+    layout_names = layout_obj.get_layer_names()
+    if topo_names is None or layout_names is None:
+        return
+
+    if len(topo_names) != len(layout_names):
+        raise ValueError(
+            "Topology/layout layer count mismatch: "
+            f"{len(topo_names)} topology layers vs {len(layout_names)} layout layers"
+        )
+
+    mismatches = [
+        (idx, topo_name, layout_name)
+        for idx, (topo_name, layout_name) in enumerate(zip(topo_names, layout_names))
+        if topo_name != layout_name
+    ]
+    if mismatches:
+        idx, topo_name, layout_name = mismatches[0]
+        raise ValueError(
+            "Topology/layout layer name mismatch at layer "
+            f"{idx}: topology='{topo_name}', layout='{layout_name}'"
+        )
+
+
 class scalesim:
     """
     The top level class for the SCALE-Sim v2 simulator that provides methods for setting parameters,
@@ -103,6 +128,8 @@ class scalesim:
         # Parse the topology
         self.topo.load_arrays(topofile=self.topology_file, mnk_inputs=self.read_gemm_inputs)
         self.layout.load_arrays(layoutfile=self.layout_file, mnk_inputs=self.read_gemm_inputs)
+        if self.config.using_ifmap_custom_layout or self.config.using_filter_custom_layout:
+            _validate_layout_matches_topology(self.topo, self.layout)
 
         #num_layers = self.topo.get_num_layers()
         #self.config.scale_memory_maps(num_layers=num_layers)

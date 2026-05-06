@@ -5,7 +5,7 @@ git checkout configs/google_ramulator.cfg
 mkdir results
 mkdir results/dram_results
 mkdir results/dram_results/mem_bw
-ramulator_path="./submodules/ramulator/configs"
+ramulator_path="${SCALE_SIM_RAMULATOR_DIR:-./ramulator}/configs"
 outpath="./results/dram_results/mem_bw"
 sed -i "s/channels = [0-9]\+/channels = 1/g" $ramulator_path/DDR4-config.cfg
 echo "Running scalesimV3 with r1c1 configuration"

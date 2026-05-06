@@ -4,6 +4,7 @@ This file contains the 'simulator' class that simulates the entire model using t
 """
 
 import os
+from pathlib import Path
 
 from scalesim.scale_config import scale_config as cfg
 from scalesim.topology_utils import topologies as topo
@@ -83,15 +84,13 @@ class simulator:
 
             self.single_layer_sim_object_list.append(this_layer_sim)
 
-        if not os.path.isdir(self.top_path):
-            os.mkdir(self.top_path)
+        base_path = Path(self.top_path)
+        base_path.mkdir(parents=True, exist_ok=True)
 
-        report_path = self.top_path + '/' + self.conf.get_run_name()
+        report_path = base_path / self.conf.get_run_name()
+        report_path.mkdir(parents=True, exist_ok=True)
 
-        if not os.path.isdir(report_path):
-            os.mkdir(report_path)
-
-        self.top_path = report_path
+        self.top_path = str(report_path)
 
         # 2. Run each layer
         # TODO: This is parallelizable
@@ -271,16 +270,18 @@ class simulator:
             sparse_report.close()
 
     #
-    def get_total_cycles(self):
+    def get_total_cycles(self, include_prefetch=False):
         """
-        Method which aggregates the total cycles (both compute and stall) across all the layers for
-        the given workload.
+        Aggregate cycles across layers. By default this returns 'Total Cycles'
+        excluding prefetch so external estimators can compare against compute+stall cycles.
+        Set include_prefetch=True to use 'Total Cycles (incl. prefetch)'.
         """
         assert self.all_layer_run_done, 'Layer runs are not done yet'
 
+        index = 0 if include_prefetch else 1
         total_cycles = 0
         for layer_obj in self.single_layer_sim_object_list:
-            cycles_this_layer = int(layer_obj.get_compute_report_items[0])
+            cycles_this_layer = int(layer_obj.get_compute_report_items()[index])
             total_cycles += cycles_this_layer
 
         return total_cycles

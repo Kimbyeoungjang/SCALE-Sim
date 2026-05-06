@@ -1,4 +1,12 @@
+import csv
 import math
+
+
+def _clean_csv_row(row):
+    cleaned = [cell.strip() for cell in row]
+    while cleaned and cleaned[-1] == "":
+        cleaned.pop()
+    return cleaned
 
 
 class layouts(object):
@@ -25,6 +33,13 @@ class layouts(object):
         self.layout_calc_hyper_param_flag = False
         self.layers_calculated_hyperparams = []
 
+    def _is_invalid_layer_id(self, layer_id):
+        return (
+            not self.layout_load_flag
+            or layer_id < 0
+            or layer_id >= self.num_layers
+        )
+
     #
     def load_layer_params_from_list(self, layer_name, elems_list=[]):
         self.layout_file_name = ''
@@ -40,20 +55,24 @@ class layouts(object):
         self.load_layout_conv(layoutfile)
 
     def load_layout_conv(self, layoutfile):
-        first = True
         self.layout_file_name = layoutfile.split('/')[-1]
         name_arr = self.layout_file_name.split('.')
         if len(name_arr) > 1:
             self.current_layout_name = self.layout_file_name.split('.')[-2]
         else:
             self.current_layout_name = self.layout_file_name
-        f = open(layoutfile, 'r')
-        for row in f:
-            row = row.strip()
-            if first or row == '':
-                first = False
-            else:
-                elems = row.split(',')[:-1]
+        with open(layoutfile, 'r', newline='') as f:
+            reader = csv.reader(f)
+            next(reader, None)
+            for row_num, row in enumerate(reader, start=2):
+                elems = _clean_csv_row(row)
+                if not elems:
+                    continue
+                if len(elems) < 21:
+                    raise ValueError(
+                        f"{layoutfile}:{row_num}: layout rows need a layer name "
+                        "plus 20 layout fields"
+                    )
                 # depth-wise convolution
                 if 'DP' in elems[0].strip():
                     for dp_layer in range(int(elems[5].strip())):
@@ -111,17 +130,15 @@ class layouts(object):
                     "Filter Width Interline Order"
                 ]
 
-        f = open(filename, 'w')
-        log = ",".join(header)
-        log += ",\n"
-        f.write(log)
-
-        for param_arr in self.layout_arrays:
-            log = ",".join([str(x) for x in param_arr])
+        with open(filename, 'w') as f:
+            log = ",".join(header)
             log += ",\n"
             f.write(log)
 
-        f.close()
+            for param_arr in self.layout_arrays:
+                log = ",".join([str(x) for x in param_arr])
+                log += ",\n"
+                f.write(log)
 
 
     def append_layout_arrays(self, layer_name, elems):
@@ -152,49 +169,55 @@ class layouts(object):
 
     #
     def get_layer_ifmap_intraline_factor(self, layer_id=0):
-        if not (self.layout_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: layout.get_layer_ifmap_intraline_factor: Invalid layer id")
+            return
 
         return [self.layout_arrays[layer_id][1], self.layout_arrays[layer_id][2], self.layout_arrays[layer_id][5]]
 
     #
     def get_layer_ifmap_intraline_order(self, layer_id=0):
-        if not (self.layout_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: layout.get_layer_ifmap_intraline_order: Invalid layer id")
+            return
 
         return self.layout_arrays[layer_id][7:10]
 
     #
     def get_layer_ifmap_interline_order(self, layer_id=0):
-        if not (self.layout_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: layout.get_layer_ifmap_interline_order: Invalid layer id")
+            return
 
         return self.layout_arrays[layer_id][10:13]
 
     #
     def get_layer_filter_intraline_factor(self, layer_id=0):
-        if not (self.layout_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: layout.get_layer_filter_intraline_factor: Invalid layer id")
+            return
 
         return [self.layout_arrays[layer_id][6], self.layout_arrays[layer_id][5], self.layout_arrays[layer_id][3], self.layout_arrays[layer_id][4]]
 
     #
     def get_layer_filter_intraline_order(self, layer_id=0):
-        if not (self.layout_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: layout.get_layer_filter_intraline_order: Invalid layer id")
+            return
 
         return self.layout_arrays[layer_id][13:17]
 
     #
     def get_layer_filter_interline_order(self, layer_id=0):
-        if not (self.layout_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: layout.get_layer_filter_interline_order: Invalid layer id")
+            return
 
         return self.layout_arrays[layer_id][17:]
 
 
     def get_layer_params(self, layer_id=0):
-        if not (self.layout_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: layout.get_layer_params: Invalid layer id")
             return
         layer_params = self.layout_arrays[layer_id]
@@ -206,7 +229,7 @@ class layouts(object):
             return
         indx = -1
         for i in range(len(self.layout_arrays)):
-            if layer_name == self.layout_arrays[i]:
+            if layer_name == self.layout_arrays[i][0]:
                 indx = i
         if indx == -1:
             print("WARNING: Not found")
@@ -214,7 +237,7 @@ class layouts(object):
 
     #
     def get_layer_name(self, layer_id=0):
-        if not (self.layout_load_flag or self.num_layers - 1 < layer_id):
+        if self._is_invalid_layer_id(layer_id):
             print("ERROR: layout.get_layer_name: Invalid layer id")
             return
 

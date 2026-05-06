@@ -24,6 +24,12 @@ test
 test_benchmark*
 result_parser.py
 test*
+!test/
+!test/test_*.py
 configs_test
 benchmark_results
 results/
+
+ramulator/ramulator
+ramulator/obj/
+*.o

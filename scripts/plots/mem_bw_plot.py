@@ -22,11 +22,12 @@ def file_extraction(filename):
     with open(filename,'r') as f:
         for line in f.readlines():
             if 'dram_cycles' in line:
-                dram_cycles = (float(re.split('\s+',line)[2]))
+                dram_cycles = (float(re.split(r'\s+',line)[2]))
             if 'incoming_requests' in line:
-                incoming_requests = (float(re.split('\s+',line)[2]))
-    f.close()
+                incoming_requests = (float(re.split(r'\s+',line)[2]))
     total_time = dram_cycles*cycle
+    if total_time == 0:
+        raise ValueError(f"No DRAM cycles found in {filename}")
     bw_value = (incoming_requests/total_time )* 1000
     return bw_value
     
@@ -61,8 +62,8 @@ if __name__ =="__main__":
     for i in range(len(config)):
         num_file=0
         run_folder = os.getcwd() + '/Exp1/' + benchmark+'_'+ config[i]
-        if not os.listdir(run_folder):
-            assert "The specific configuration does not exist"
+        if not os.path.isdir(run_folder) or not os.listdir(run_folder):
+            raise FileNotFoundError(f"The specific configuration does not exist: {run_folder}")
         for file in os.listdir(run_folder):
             if file.startswith('DDR4_'):
                 #index = int(re.findall('\d+',file)[1][2:])
@@ -75,6 +76,4 @@ if __name__ =="__main__":
             bw.append(file_extraction(filepath))
         result[config[i]] = bw
     plot_bw()
-
-
 

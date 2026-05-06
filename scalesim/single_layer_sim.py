@@ -4,6 +4,7 @@ the model and generates the data that goes inside the reports.
 """
 
 import os
+from pathlib import Path
 import numpy as np
 
 from scalesim.compute.compression import compression as cp
@@ -132,10 +133,6 @@ class single_layer_sim:
         arr_dims = self.config.get_array_dims()
         self.using_ifmap_custom_layout = self.config.using_ifmap_custom_layout
         self.using_filter_custom_layout = self.config.using_filter_custom_layout
-        if self.using_ifmap_custom_layout:
-            print("self.using_ifmap_custom_layout -- True")
-        if self.using_filter_custom_layout:
-            print("self.using_filter_custom_layout -- True")
 
         self.num_mac_unit = arr_dims[0] * arr_dims[1]
         self.verbose=verbose
@@ -303,18 +300,15 @@ class single_layer_sim:
         """
         assert self.params_set_flag, 'Parameters are not set'
 
-        dir_name = top_path + '/layer' + str(self.layer_id)
-        if not os.path.isdir(dir_name):
-            cmd = 'mkdir ' + dir_name
-            os.system(cmd)
+        dir_name = Path(top_path) / f'layer{self.layer_id}'
+        dir_name.mkdir(parents=True, exist_ok=True)
 
-        ifmap_sram_filename = dir_name +  '/IFMAP_SRAM_TRACE.csv'
-        filter_sram_filename = dir_name + '/FILTER_SRAM_TRACE.csv'
-        ofmap_sram_filename = dir_name +  '/OFMAP_SRAM_TRACE.csv'
-
-        ifmap_dram_filename = dir_name +  '/IFMAP_DRAM_TRACE.csv'
-        filter_dram_filename = dir_name + '/FILTER_DRAM_TRACE.csv'
-        ofmap_dram_filename = dir_name +  '/OFMAP_DRAM_TRACE.csv'
+        ifmap_sram_filename = str(dir_name / 'IFMAP_SRAM_TRACE.csv')
+        filter_sram_filename = str(dir_name / 'FILTER_SRAM_TRACE.csv')
+        ofmap_sram_filename = str(dir_name / 'OFMAP_SRAM_TRACE.csv')
+        ifmap_dram_filename = str(dir_name / 'IFMAP_DRAM_TRACE.csv')
+        filter_dram_filename = str(dir_name / 'FILTER_DRAM_TRACE.csv')
+        ofmap_dram_filename = str(dir_name / 'OFMAP_DRAM_TRACE.csv')
 
         self.memory_system.print_ifmap_sram_trace(ifmap_sram_filename)
         self.memory_system.print_ifmap_dram_trace(ifmap_dram_filename)

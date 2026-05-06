@@ -5,6 +5,7 @@ double buffered SRAMs.
 
 import time
 import os
+from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
@@ -78,6 +79,28 @@ class double_buffered_scratchpad:
         self.using_ifmap_custom_layout = False
         self.using_filter_custom_layout = False
 
+    def _ramulator_latency_file(self, operand, layer_id):
+        latency_dir = Path(os.environ.get("SCALE_SIM_RAMULATOR_LATENCY_DIR", "results"))
+        topology_name = os.environ.get("SCALE_SIM_RAMULATOR_TOPOLOGY", "")
+        if topology_name == "":
+            get_name = getattr(self.topo, "get_current_topo_name", None)
+            if callable(get_name):
+                topology_name = get_name() or ""
+
+        candidates = []
+        if topology_name:
+            candidates.append(latency_dir / f"{topology_name}_{operand}File{layer_id}.npy")
+        candidates.append(latency_dir / f"_{operand}File{layer_id}.npy")
+
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+
+        expected = " or ".join(str(candidate) for candidate in candidates)
+        raise FileNotFoundError(
+            f"Ramulator latency file not found for {operand} layer {layer_id}: {expected}"
+        )
+
     #
     def set_params(self,
                    layer_id=0,
@@ -126,12 +149,9 @@ class double_buffered_scratchpad:
             self.filter_buf = rdbuf()
             
             if self.use_ramulator_trace == True:
-                root_path = os.getcwd()
-                #topology_file = self.topo.split('.')[0]
-                topology_file =''
-                ifmap_dram_trace = (root_path+"/results/"+topology_file+"_ifmapFile"+str(layer_id)+".npy")
-                filter_dram_trace = (root_path+"/results/"+topology_file+"_filterFile"+str(layer_id)+".npy")
-                ofmap_dram_trace = (root_path+"/results/"+topology_file+"_ofmapFile"+str(layer_id)+".npy")
+                ifmap_dram_trace = self._ramulator_latency_file("ifmap", layer_id)
+                filter_dram_trace = self._ramulator_latency_file("filter", layer_id)
+                ofmap_dram_trace = self._ramulator_latency_file("ofmap", layer_id)
                 self.ifmap_port.def_params(config = self.config, latency_file=ifmap_dram_trace)
                 self.filter_port.def_params(config = self.config, latency_file=filter_dram_trace)
                 self.ofmap_port.def_params(config=self.config, latency_file=ofmap_dram_trace)
@@ -304,7 +324,7 @@ class double_buffered_scratchpad:
                                                  axis=1)
         #self.total_cycles = int(ofmap_serviced_cycles[-1][0])
         ## Probable fault in sanity check
-        self.total_cycles = int(max(ofmap_serviced_cycles))
+        self.total_cycles = int(np.max(ofmap_serviced_cycles))
 
         # END of serving demands from memory
         self.traces_valid = True

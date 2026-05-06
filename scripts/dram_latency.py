@@ -1,200 +1,130 @@
-import numpy as np 
-import numba
-import pandas as pd
-import os
-import multiprocessing as mp
+#!/usr/bin/env python3
+"""Extract per-buffer latency arrays from patched Ramulator RD:/WR: stdout traces."""
+from __future__ import annotations
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 import argparse
-from tqdm import tqdm
+import numpy as np
 
-mp.set_start_method('spawn',True)
 
-rootPath= os.getcwd()
-resultsPath = rootPath+"/results/"
+def parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    value = value.strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid boolean value: {value}")
 
-class dram_latency():
-    def __init__(self,
-                ramulatorFile='',
-                ):
-        self.ramulatorFile = ramulatorFile
-        self.ifmapLatency  = []
-        self.filterLatency = []
-        self.ofmapLatency  = []
-        self.filterOffset  = 10000000
-        self.ofmapOffset   = 20000000
-        self.metaOffset    = 30000000
-        self.fakeOffset    = 40000000
-        self.bw = 10
-    
-    def latencyExtraction(self, layerNo, topo,shaper):
-        print("starting to read file " + str(self.ramulatorFile))
-        df = pd.read_csv(self.ramulatorFile,header=None,skipfooter=1,delimiter=' ',engine='python')
-        print("file read")
-        df = df.sort_values(2)
-        print("sorting")
-        latency = df[3]-df[2]
-        print("latency")
-        df[1] = df[1].str.replace('0x','')
-        df[1] = df[1].apply(lambda x: int(x,16))
-        count=0
-        flag=0
-        lastIndex = 'ifmap'
-        iterate=100000
-        print(df.shape[0])
-        while count < df.shape[0]:
-            endIndex = count+self.bw - 1
-            if count+self.bw > df.shape[0]:
-                endIndex = df.shape[0] - 1
-            if count > iterate:
-                print("Iteration {} of {}".format(count,df.shape[0]))
-                iterate+=100000
 
-            if count >= endIndex:
-                break
-#            k=count
-#            for i in range(count,count+self.bw):
-#                a= df[2][k]
-#                b=df[2][i]
-#                m = a<self.ofmapOffset
-#                n= b<self.ofmapOffset
-#                ifmapAddress = df[2][k] < self.filterOffset and df[2][i] < self.filterOffset
-#                filterAddress = df[2][k] < self.ofmapOffset and df[2][i] < self.ofmapOffset
-#                ofmapAddress = not df[2][k] < self.ofmapOffset and not df[2][i] < self.ofmapOffset
-#                if(ifmapAddress + filterAddress + ofmapAddress) == 0:
-#                    if counter == 0:
-#                        counter=1
-#                    else:
-#                        print("ERROR")
-#                        print(df[2][count:count+10])
-#                        print(k)
-#                        print(i)
-#                    k=i
-            addressList = df[1][count:endIndex].sort_values().to_list()
-            startAddress = addressList[0]
-            endAddress = addressList[-1]
+def parse_ramulator_trace(path: Path) -> list[tuple[int, int]]:
+    rows: list[tuple[int, int]] = []
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 4 or parts[0] not in {"RD:", "WR:"}:
+                continue
+            try:
+                addr = int(parts[1], 16)
+                arrive = int(parts[2])
+                depart = int(parts[3])
+            except ValueError:
+                continue
+            rows.append((addr, depart - arrive))
+    return rows
 
-            if shaper == 1:
-                ifmapAddress =  startAddress < self.filterOffset
-                filterAddress = startAddress < self.ofmapOffset
-                ofmapAddress =  startAddress < self.metaOffset
-            else:
-                ifmapAddress =  (0 <= startAddress < self.filterOffset) and (0 <= endAddress < self.filterOffset)
-                filterAddress = (self.filterOffset <= startAddress < self.ofmapOffset) and (self.filterOffset <= endAddress < self.ofmapOffset)
-                ofmapAddress =  (self.ofmapOffset <= startAddress < self.metaOffset) and (self.ofmapOffset <= startAddress < self.metaOffset)
-                #ifmapAddress =  startAddress in range(0,self.filterOffset) and endAddress in range(0,self.filterOffset)
-                #filterAddress=  startAddress in range(self.filterOffset,self.ofmapOffset) and endAddress in range(self.filterOffset,self.ofmapOffset)
-                #ofmapAddress =  startAddress in range(self.ofmapOffset,self.metaOffset) and endAddress in range(self.ofmapOffset,self.metaOffset)
 
-            if shaper == 1:
-                #a=[]
-                #for i in range(count,count+self.bw):
-                #    a.append(df[2][i])
+def category(addr: int, filter_offset: int, ofmap_offset: int, meta_offset: int) -> str | None:
+    if 0 <= addr < filter_offset:
+        return "ifmap"
+    if filter_offset <= addr < ofmap_offset:
+        return "filter"
+    if ofmap_offset <= addr < meta_offset:
+        return "ofmap"
+    return None
 
-                if ifmapAddress:
-                    self.ifmapLatency.append(np.amax(latency[count:count+self.bw]))
-                    lastIndex = 'ifmap'
-                elif filterAddress:
-                    self.filterLatency.append(np.amax(latency[count:count+self.bw]))   
-                    lastIndex = 'filter'
 
-                elif ofmapAddress:
-                    self.ofmapLatency.append(np.amax(latency[count:count+self.bw]))  
-                    lastIndex = 'ofmap' 
+def append_group(latencies: dict[str, list[int]], group: list[tuple[str, int]]) -> None:
+    if not group:
+        return
+    cat = group[0][0]
+    latencies[cat].append(max(v for _, v in group))
+
+
+def extract_one(path: Path, topology: str, results_dir: Path, *, bw: int, shaper: bool, filter_offset: int, ofmap_offset: int, meta_offset: int) -> str:
+    layer_no = path.stem.split("_")[-1]
+    rows = parse_ramulator_trace(path)
+    latencies: dict[str, list[int]] = {"ifmap": [], "filter": [], "ofmap": []}
+    last_cat = "ifmap"
+    i = 0
+    while i < len(rows):
+        chunk = rows[i:i + bw]
+        cats = [(category(addr, filter_offset, ofmap_offset, meta_offset), lat) for addr, lat in chunk]
+        valid = [(cat, lat) for cat, lat in cats if cat is not None]
+        if not valid:
+            i += max(1, len(chunk))
+            continue
+        unique = {cat for cat, _ in valid}
+        if len(unique) == 1 or shaper:
+            cat = valid[0][0] if len(unique) == 1 else last_cat
+            latencies[cat].append(max(lat for _, lat in valid))
+            last_cat = cat
+            i += max(1, len(chunk))
+        else:
+            # Split mixed chunks into contiguous same-category runs to avoid dropping padding/mixed groups.
+            group: list[tuple[str, int]] = []
+            for cat, lat in valid:
+                if not group or group[-1][0] == cat:
+                    group.append((cat, lat))
                 else:
-                    if lastIndex == 'ifmap':
-                        self.ifmapLatency.append(np.amax(latency[count:count+self.bw]))
-                    elif lastIndex == 'filter':
-                        self.filterLatency.append(np.amax(latency[count:count+self.bw]))  
-                    else:
-                        self.ofmapLatency.append(np.amax(latency[count:count+self.bw]))  
-                count+=self.bw
-            
-            else:
-                if ifmapAddress:
-                    self.ifmapLatency.append(np.amax(latency[count:count+self.bw]))
-                    count+=self.bw
-                    lastIndex = 'ifmap'
-                elif filterAddress:
-                    self.filterLatency.append(np.amax(latency[count:count+self.bw]))  
-                    count+=self.bw 
-                    lastIndex = 'filter'
-                elif ofmapAddress:
-                    self.ofmapLatency.append(np.amax(latency[count:count+self.bw]))  
-                    count+=self.bw
-                    lastIndex = 'ofmap'
-                else:                       # ---- This is the padding case... 
-                    addressList = df[1][count:count+self.bw].to_list()
-                    ifmapAddress =  0 <= addressList[0] < self.filterOffset
-                    filterAddress = self.filterOffset <= addressList[0] < self.ofmapOffset
-                    ofmapAddress =  self.ofmapOffset  <= addressList[0] < self.metaOffset
-                    for i in range(0,self.bw):
-                        exp = (((0 <= addressList[i] < self.filterOffset) and ifmapAddress) or 
-                               ((self.filterOffset <= addressList[i] < self.ofmapOffset) and filterAddress) or 
-                               ((self.ofmapOffset <= addressList[i] < self.metaOffset) and ofmapAddress))
-                        if(not exp):
-                            endIndex = count + i
-                            break
+                    append_group(latencies, group)
+                    last_cat = group[-1][0]
+                    group = [(cat, lat)]
+            append_group(latencies, group)
+            if group:
+                last_cat = group[-1][0]
+            i += max(1, len(chunk))
 
-                    if(ifmapAddress):
-                        self.ifmapLatency.append(np.amax(latency[count:endIndex]))
-                    elif(filterAddress):
-                        self.filterLatency.append(np.amax(latency[count:endIndex]))                            
-                    elif(ofmapAddress):
-                        self.ofmapLatency.append(np.amax(latency[count:endIndex]))   
-                    count = endIndex
+    np.save(results_dir / f"{topology}_ifmapFile{layer_no}.npy", np.asarray(latencies["ifmap"], dtype=np.int64))
+    np.save(results_dir / f"{topology}_filterFile{layer_no}.npy", np.asarray(latencies["filter"], dtype=np.int64))
+    np.save(results_dir / f"{topology}_ofmapFile{layer_no}.npy", np.asarray(latencies["ofmap"], dtype=np.int64))
+    return f"{path.name}: ifmap={len(latencies['ifmap'])}, filter={len(latencies['filter'])}, ofmap={len(latencies['ofmap'])}"
 
 
-        np.asarray(self.ifmapLatency)
-        np.asarray(self.filterLatency)
-        np.asarray(self.ofmapLatency)
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-topology", default="", help="Trace filename prefix")
+    parser.add_argument("-results-dir", default="results")
+    parser.add_argument("-parallel", type=parse_bool, default=False)
+    parser.add_argument("-jobs", type=int, default=1)
+    parser.add_argument("-shaper", type=parse_bool, default=False)
+    parser.add_argument("-bw", type=int, default=10)
+    parser.add_argument("-filter-offset", type=int, default=10000000)
+    parser.add_argument("-ofmap-offset", type=int, default=20000000)
+    parser.add_argument("-meta-offset", type=int, default=30000000)
+    args = parser.parse_args()
 
-        #print("-------------------------- IFMAP Latency -------------------------")
-        #print(self.ifmapLatency)
-        #print("-------------------------- Filter Latency -------------------------")
-        #print(self.filterLatency)
-        #print("-------------------------- OFMAP Latency -------------------------")
-        #print(self.ofmapLatency)
+    results_dir = Path(args.results_dir)
+    topology = args.topology or "default"
+    traces = sorted(p for p in results_dir.iterdir() if p.name.startswith(f"{topology}_RamulatorTrace") and p.suffix == ".trace")
+    if not traces:
+        raise FileNotFoundError(f"No RamulatorTrace files found for prefix {topology!r} in {results_dir}")
 
-        np.save(resultsPath+"/"+topo+'_ifmapFile'+layerNo+'.npy',self.ifmapLatency)
-        np.save(resultsPath+"/"+topo+'_filterFile'+layerNo+'.npy',self.filterLatency)
-        np.save(resultsPath+"/"+topo+'_ofmapFile'+layerNo+'.npy',self.ofmapLatency)
-
-    def check_integrity_address(self,address):
-        address = address - self.metaOffset
-        address 
-
-def worker(fileName, topology,shaper):
-    layerNo = fileName.split('.')[0].split('_')[-1]
-    latencyFunc = dram_latency(ramulatorFile=resultsPath+fileName)
-    latencyFunc.latencyExtraction(layerNo, topology,shaper)
+    jobs = args.jobs if args.parallel else 1
+    jobs = max(1, jobs)
+    kwargs = dict(bw=args.bw, shaper=args.shaper, filter_offset=args.filter_offset, ofmap_offset=args.ofmap_offset, meta_offset=args.meta_offset)
+    if jobs == 1:
+        for trace in traces:
+            print(extract_one(trace, topology, results_dir, **kwargs))
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            futs = [ex.submit(extract_one, trace, topology, results_dir, **kwargs) for trace in traces]
+            for fut in as_completed(futs):
+                print(fut.result())
+    return 0
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-topology', metavar='Topology file', type=str,
-                        default="",
-                        help="Directory path for the layers"
-                        )
-    parser.add_argument('-parallel', metavar='Run sequential or parallel', type=bool,
-                        default=False,
-                        help="Runs script in parallel for all layers"
-                        )
-    
-    parser.add_argument('-shaper', metavar='Presence of shaper', type=bool,
-                        default=False,
-                        help="Define if shaper is present"
-                        )
-    args = parser.parse_args()
-    topology = args.topology
-    parallel = args.parallel
-    shaper = args.shaper
-
-    tracefiles = []
-    for file in os.listdir(resultsPath):
-        if file.startswith(topology+"_RamulatorTrace") and file.endswith(".trace"):
-            tracefiles.append(file)
-    for tracefile in tracefiles:
-        if parallel:
-            p = mp.Process(target=worker, args=(tracefile, topology,shaper))
-            p.start()
-        else:
-            worker(tracefile, topology, shaper)
+    raise SystemExit(main())

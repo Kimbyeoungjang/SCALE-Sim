@@ -74,31 +74,27 @@ class scale_config:
         config.read(conf_file_in)
 
         section = 'general'
-        self.run_name = config.get(section, 'run_name')
+        self.run_name = config.get(section, 'run_name', fallback=self.run_name)
 
         # Anand: ISSUE #2. Patch
         section = 'run_presets'
-        bw_mode_string = config.get(section, 'InterfaceBandwidth')
+        bw_mode_string = config.get(section, 'InterfaceBandwidth').strip().upper()
         if bw_mode_string == 'USER':
             self.use_user_bandwidth = True
         elif bw_mode_string == 'CALC':
             self.use_user_bandwidth = False
         else:
-            message = 'ERROR: ' + me
-            message += 'Use either USER or CALC in InterfaceBandwidth feild. Aborting!'
-            return
+            raise ValueError(
+                f"ERROR: {me}: Use either USER or CALC in InterfaceBandwidth field."
+            )
         
         # Parse UseRamulatorTrace if present
         if config.has_option(section, 'UseRamulatorTrace'):
-            ramulator_on = config.get(section, 'UseRamulatorTrace')
-            if ramulator_on == 'True':
-                self.use_ramulator_trace = True
-            else:
-                self.use_ramulator_trace = False
+            self.use_ramulator_trace = config.getboolean(section, 'UseRamulatorTrace')
         
         # Parse TimeLinearModel if present
         if config.has_option(section, 'TimeLinearModel'):
-            self.time_linear_model = config.get(section, 'TimeLinearModel')
+            self.time_linear_model = config.get(section, 'TimeLinearModel').strip()
             assert self.time_linear_model in ['None', 'TPUv4', 'TPUv5e', 'TPUv6e'], f"ERROR: Invalid time linear model '{self.time_linear_model}'. Must be one of: None, TPUv4, TPUv5e, TPUv6e"
 
 
@@ -123,14 +119,18 @@ class scale_config:
             self.req_buf_sz_wr = int(config.get(section, 'WriteRequestBuffer')) // div_factor
 
         layout_section = 'layout'
-        self.using_ifmap_custom_layout = config.getboolean(layout_section, 'IfmapCustomLayout')
-        self.using_filter_custom_layout = config.getboolean(layout_section, 'FilterCustomLayout')
-        self.ifmap_sram_bank_bandwidth = int(config.get(layout_section, 'IfmapSRAMBankBandwidth'))
-        self.ifmap_sram_bank_num = int(config.get(layout_section, 'IfmapSRAMBankNum'))
-        self.ifmap_sram_bank_port = int(config.get(layout_section, 'IfmapSRAMBankPort'))
-        self.filter_sram_bank_bandwidth = int(config.get(layout_section, 'FilterSRAMBankBandwidth'))
-        self.filter_sram_bank_num = int(config.get(layout_section, 'FilterSRAMBankNum'))
-        self.filter_sram_bank_port = int(config.get(layout_section, 'FilterSRAMBankPort'))
+        if config.has_section(layout_section):
+            self.using_ifmap_custom_layout = config.getboolean(layout_section, 'IfmapCustomLayout', fallback=False)
+            self.using_filter_custom_layout = config.getboolean(layout_section, 'FilterCustomLayout', fallback=False)
+            self.ifmap_sram_bank_bandwidth = config.getint(layout_section, 'IfmapSRAMBankBandwidth', fallback=self.ifmap_sram_bank_bandwidth)
+            self.ifmap_sram_bank_num = config.getint(layout_section, 'IfmapSRAMBankNum', fallback=self.ifmap_sram_bank_num)
+            self.ifmap_sram_bank_port = config.getint(layout_section, 'IfmapSRAMBankPort', fallback=self.ifmap_sram_bank_port)
+            self.filter_sram_bank_bandwidth = config.getint(layout_section, 'FilterSRAMBankBandwidth', fallback=self.filter_sram_bank_bandwidth)
+            self.filter_sram_bank_num = config.getint(layout_section, 'FilterSRAMBankNum', fallback=self.filter_sram_bank_num)
+            self.filter_sram_bank_port = config.getint(layout_section, 'FilterSRAMBankPort', fallback=self.filter_sram_bank_port)
+        else:
+            self.using_ifmap_custom_layout = False
+            self.using_filter_custom_layout = False
         
         # Anand: ISSUE #2. Patch
         if self.use_user_bandwidth:
@@ -138,10 +138,10 @@ class scale_config:
                                for x in config.get(section, 'Bandwidth').strip().split(',')]
 
         if self.df not in self.valid_df_list:
-            print("WARNING: Invalid dataflow")
+            raise ValueError(f"Invalid dataflow '{self.df}'. Expected one of {self.valid_df_list}")
 
         if config.has_section('network_presets'):  # Read network_presets
-            self.topofile = config.get(section, 'TopologyCsvLoc').split('"')[1]
+            self.topofile = config.get('network_presets', 'TopologyCsvLoc', fallback=self.topofile).strip().strip('\"')
 
         # Sparsity - make this section optional
         if config.has_section('sparsity'):
@@ -296,7 +296,7 @@ class scale_config:
         """
         self.ifmap_offset = ifmap_offset
         self.filter_offset = filter_offset
-        self.ifmap_offset = ofmap_offset
+        self.ofmap_offset = ofmap_offset
         self.valid_conf_flag = True
 
     #
@@ -482,10 +482,6 @@ class scale_config:
         """
         Method to get the bandwidths as a list.
         """
-        if self.valid_conf_flag:
-            return self.bandwidths
-
-    def get_bandwidths_as_list(self):
         if self.valid_conf_flag:
             return self.bandwidths
         

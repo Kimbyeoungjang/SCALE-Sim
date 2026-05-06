@@ -1,261 +1,200 @@
-import numpy as np
-import os, os.path
-import sys
+#!/usr/bin/env python3
+"""Generate Ramulator DRAM traces from SCALE-Sim layer traces and run Ramulator.
+
+This replaces the old cycle-by-cycle scanner. It streams only rows that contain
+requests, so sparse traces no longer spend time iterating over empty cycles.
+"""
+from __future__ import annotations
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
 import argparse
+import heapq
 import subprocess
-import queue
-import multiprocessing as mp
+from pathlib import Path
+import sys
+from typing import Iterable, Iterator
 
-rootPath=os.getcwd()
-resultsPath=os.getcwd()+"/results/"
 
-mp.set_start_method('spawn',True)
+@dataclass(order=True)
+class TraceEvent:
+    cycle: int
+    order: int
+    op: str
+    addresses: list[int]
 
-# ---- Replace data structures to panda dataframe for quicker access --- #
-class dataExtraction:
-    def __init__(   self,
-                    ifmapFile=[],
-                    ofmapFile=[],
-                    filterFile=[],
-                    multiTenant=False,
-                    traceMap='',
-                    ramulatorOut=''
-                    ):
-        self.multiTenant = multiTenant
-        self.traceMap = traceMap
-        self.ramulatorOut = ramulatorOut
-        self.ifmap_file = ifmapFile
-        self.ofmap_file = ofmapFile
-        self.filter_file = filterFile
 
-        self.ifmapStartCycle = 0
-        self.filterStartCycle = 0
-        self.ofmapStartCycle = 0
-        self.bw = 1
-        self.cycle =[]
-    
-    def extractAddress(self,ifmapFile,ofmapFile,filterFile,layerNo,shaper):
-        ifmapAddress=[]
-        ofmapAddress=[]
-        filterAddress=[]
-        ofmapIntegrityAddress=[]
-        ifmapCycle=[]
-        ofmapCycle=[]
-        ofmapIntegrityCycle=[]
-        filterCycle=[]
-        flag = 0
-        txnCount=0
-        fake_address = 40000000
-    # ----- Extract DRAM transactions for input feature map ----- #
-        with open(ifmapFile,'r') as f:
-            for line in f.readlines():
-                line = line.strip()
-                x = line.split(',')
-                
-                if flag ==0:
-                    self.ifmapStartCycle = int(float(x[0]))
-                    self.bw = len(x) - 1
-                    flag=1
-                ifmapCycle.append(int(float(x[0])))
-                
-                for i in range(1,len(x)):
-                    ifmapAddress.append(hex(int(float(x[i]))))
-                txnCount+=1
-                
-                #cycle = int(x[0])
-                #self.txnCount.append(len(x) -1)
-        f.close()
-        print("Layer%s: Number of IFMAP lines is %d" % (layerNo, txnCount))
-        print("Layer%s: Reading IFMAP file complete" % layerNo)
-        
-        txnCount=0
-        flag = 0
-    # ----- Extract DRAM transactions for filter map ----- #
-        with open(filterFile,'r') as f:
-            for line in f.readlines():
-                line = line.strip()
-                x = line.split(',')
-                if flag == 0:
-                    self.filterStartCycle = int(float(x[0]))
-                    flag=1
-                filterCycle.append(int(float(x[0])))
-                for i in range(1,len(x)):
-                    filterAddress.append(hex(int(float(x[i]))))  
-                txnCount+=1
-        f.close()
-        print("Layer%s: Number of FILTER lines is %d" % (layerNo, txnCount))
-        print("Layer%s: Reading FILTER file complete" % layerNo)
-        txnCount=0
-        flag = 0
-        integrityRMW = 0
-    # ----- Extract DRAM transactions for output feature map ----- #
-        with open(ofmapFile,'r') as f:
-            for line in f.readlines():
-                line = line.strip()
-                x = line.split(',')
-                if float(x[1]) > 0.0:
-                    ofmapCycle.append(int(float(x[0])))
-                    for i in range(1,len(x)):
-                        ofmapAddress.append(hex(int(float(x[i]))))
-                    txnCount+=1
-                else:
-                    ofmapIntegrityCycle.append(int(float(x[0])))
-                    for i in range(1,len(x)):
-                        ofmapIntegrityAddress.append(hex(-int(float(x[i]))))
-                    integrityRMW+=1
-        f.close()
-        self.ofmapStartCycle = min(ofmapCycle)
-        print("Layer%s: Number of OFMAP lines is %d" % (layerNo, txnCount))
-        print("Layer%s: Number of OFMAP Integrity Read lines is %d" % (layerNo, integrityRMW))
-        print("Layer%s: Reading OFMAP file complete" % layerNo)
-        np.asarray(ifmapAddress)
-        np.asarray(filterAddress)
-        np.asarray(ofmapAddress)
-        np.asarray(ofmapIntegrityAddress)
-        np.asarray(ifmapCycle)
-        np.asarray(filterCycle)
-        np.asarray(ofmapCycle)
-        np.asarray(ofmapIntegrityCycle)
-        print("Layer%s: Conversion to array complete" % layerNo)
+def parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    value = value.strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid boolean value: {value}")
 
-        ifmapIndex=0
-        filterIndex=0
-        ofmapIndex=0
-        ofmapIntegrityIndex=0
-        flag =0
-        total_count = 0
-        
-        f = open(self.traceMap,'w')
-        cycle = min(self.ifmapStartCycle,self.filterStartCycle,self.ofmapStartCycle)
-        maxCycle= max(ifmapCycle[-1],filterCycle[-1],ofmapCycle[-1])
-        while (cycle !=maxCycle+1):
-            #if cycle != ifmapCycle[0] or cycle!=ofmapCycle[0] or cycle!=filterCycle[0]:
-            if cycle in range(ifmapCycle[0],ifmapCycle[-1]+1):        # Valid cycle range for the input feature map trace
-                if cycle == ifmapCycle[ifmapIndex]:
-                    flag=1
-                    for i in range(self.bw):
-                        value = ifmapAddress[ifmapIndex*self.bw+i]
-                        if not value== "-0x1": 
-                            f.write(str(value)+" R\n")
-                        elif shaper == 1:
-                            f.write(str(hex(fake_address)) + " R\n")
 
-                    ifmapIndex+=1
+def parse_trace_file(path: Path, op: str, *, fake_address: int, shaper: bool, negate_addresses: bool = False) -> Iterator[TraceEvent]:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    with path.open("r", encoding="utf-8") as f:
+        for order, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(",") if p.strip() != ""]
+            if len(parts) < 2:
+                continue
+            try:
+                cycle = int(float(parts[0]))
+            except ValueError:
+                # Header or malformed row.
+                continue
+            addrs: list[int] = []
+            for raw in parts[1:]:
+                try:
+                    addr = int(float(raw))
+                except ValueError:
+                    continue
+                if negate_addresses:
+                    addr = -addr
+                if addr < 0:
+                    if shaper:
+                        addrs.append(fake_address)
+                    continue
+                addrs.append(addr)
+            if addrs:
+                yield TraceEvent(cycle=cycle, order=order, op=op, addresses=addrs)
 
-            if cycle in range(filterCycle[0],filterCycle[-1]+1):        # Valid cycle range for the filter map trace          
-                if cycle == filterCycle[filterIndex]: 
-                    flag=1
-                    for i in range(self.bw):
-                        value = filterAddress[filterIndex*self.bw+i]
-                        if not value== "-0x1": 
-                            f.write(str(value)+" R\n")
-                        elif shaper == 1:
-                            f.write(str(hex(fake_address)) + " R\n")
-                    filterIndex+=1
-           
-            if cycle in range(ofmapCycle[0],ofmapCycle[-1]+1):        # Valid cycle range for the output feature map trace   
-                if cycle == ofmapCycle[ofmapIndex]:
-                    flag=1
-                    for i in range(self.bw):
-                        value = ofmapAddress[ofmapIndex*self.bw+i]
-                        if not value== "-0x1": 
-                            f.write(str(value)+" W\n")                        
-                        elif shaper == 1:
-                            f.write(str(hex(fake_address)) + " W\n")
-                    ofmapIndex+=1
-            if len(ofmapIntegrityCycle) !=0:
-                if cycle in range(ofmapIntegrityCycle[0],ofmapIntegrityCycle[-1]+1):        # Valid cycle range for the input feature map trace   
-                    if cycle == ofmapIntegrityCycle[ofmapIntegrityIndex]:
-                        flag=1
-                        for i in range(self.bw):
-                            value = ofmapIntegrityAddress[ofmapIntegrityIndex*self.bw+i]
-                            if not value== "-0x1": 
-                                f.write(str(value)+" R\n")                        
-                            elif shaper == 1:
-                                f.write(str(hex(fake_address)) + " R\n")
-                        ofmapIntegrityIndex+=1
-            if flag == 1:
-                total_count += self.bw
-            else:
-                print(cycle)
-                print(ifmapCycle[ifmapIndex])
-                print(filterCycle[filterIndex])
-                print(ofmapCycle[ofmapIndex])
-            cycle+=1
-        f.close()
-        print("The number of IFMAP, FILTER, OFMAP, integrity index is {} {} {} {}".format(ifmapIndex,filterIndex,ofmapIndex,ofmapIntegrityIndex))
 
-    def runRamulator(self,prefix):
-        output=subprocess.check_output([rootPath+"/submodules/ramulator/ramulator",
-                        rootPath+"/submodules/ramulator/configs/DDR4-config.cfg",
-                        "--mode=dram",
-                        "--stats",
-                        "results/DDR4_"+prefix+".stats",
-                        self.traceMap], universal_newlines=True)
-        f = open(self.ramulatorOut, "w")
-        f.write(output)
-        f.close()
+def parse_ofmap_file(path: Path, *, fake_address: int, shaper: bool) -> Iterator[TraceEvent]:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    with path.open("r", encoding="utf-8") as f:
+        for order, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(",") if p.strip() != ""]
+            if len(parts) < 2:
+                continue
+            try:
+                cycle = int(float(parts[0]))
+                first = float(parts[1])
+            except ValueError:
+                continue
+            op = "W" if first > 0.0 else "R"
+            addrs: list[int] = []
+            for raw in parts[1:]:
+                try:
+                    addr = int(float(raw))
+                except ValueError:
+                    continue
+                if op == "R":
+                    addr = -addr
+                if addr < 0:
+                    if shaper:
+                        addrs.append(fake_address)
+                    continue
+                addrs.append(addr)
+            if addrs:
+                yield TraceEvent(cycle=cycle, order=order, op=op, addresses=addrs)
 
-def worker(layer_path, topo, shaper):
-    """ Running ramulator for multiple layers request in parallel """
-    layer_no = layer_path.split('/')[-1].replace('layer','')
-    if not os.path.isdir(layer_path):
-        sys.exit("Please run scalesim with oracle memory first to get the demand requests")
-    ifmap_file  = layer_path+"/IFMAP_DRAM_TRACE.csv"  #args.ifmap_file
-    filter_file = layer_path+"/FILTER_DRAM_TRACE.csv" #args.filter_file
-    ofmap_file  = layer_path+"/OFMAP_DRAM_TRACE.csv"  #args.ofmap_file
-    if not os.path.isdir(resultsPath):
-        os.mkdir(resultsPath)
-    mem_trace_in  = resultsPath+topo+"_DemandTrace_"+layer_no+".trace" #args.mem_trace_in
-    mem_trace_out = resultsPath+topo+"_RamulatorTrace_"+layer_no+".trace" #args.mem_trace_out
-    ramulatorExtraction = dataExtraction(
-                                        ifmapFile=ifmap_file,
-                                        ofmapFile=ofmap_file,
-                                        filterFile=filter_file,
-                                        traceMap=mem_trace_in,
-                                        ramulatorOut=mem_trace_out
-                                    )
 
-    #--- call the ramulator functions
+def write_demand_trace(layer_path: Path, out_trace: Path, *, shaper: bool, fake_address: int) -> int:
+    generators: list[Iterable[TraceEvent]] = [
+        parse_trace_file(layer_path / "IFMAP_DRAM_TRACE.csv", "R", fake_address=fake_address, shaper=shaper),
+        parse_trace_file(layer_path / "FILTER_DRAM_TRACE.csv", "R", fake_address=fake_address, shaper=shaper),
+        parse_ofmap_file(layer_path / "OFMAP_DRAM_TRACE.csv", fake_address=fake_address, shaper=shaper),
+    ]
+    out_trace.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    # heapq.merge preserves sorted-by-cycle behavior without iterating empty cycles.
+    with out_trace.open("w", encoding="utf-8") as f:
+        for ev in heapq.merge(*generators):
+            for addr in ev.addresses:
+                f.write(f"0x{addr:x} {ev.op}\n")
+                count += 1
+    return count
 
-    print("starting layer {}".format(layer_path))
-    ramulatorExtraction.extractAddress(ifmap_file,ofmap_file,filter_file,layer_no,shaper)
 
-    prefix = topo+layer_no
-    print("Starting ramulator for layer {}".format(layer_path))
-    ramulatorExtraction.runRamulator(prefix)
+def run_ramulator(ramulator_exe: Path, config: Path, demand_trace: Path, stats_path: Path, stdout_path: Path, *, mapping: Path | None = None) -> None:
+    cmd = [str(ramulator_exe), str(config), "--mode=dram", "--stats", str(stats_path)]
+    if mapping is not None:
+        cmd.extend(["--mapping", str(mapping)])
+    cmd.append(str(demand_trace))
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    stdout_path.write_text(proc.stdout, encoding="utf-8")
+    if proc.returncode != 0:
+        raise RuntimeError(f"Ramulator failed with code {proc.returncode}: {' '.join(cmd)}\n{proc.stdout}")
 
-    print("Finished ramulator for layer {}".format(layer_path))
+
+def process_layer(layer_path: Path, topology: str, results_dir: Path, ramulator_exe: Path, config: Path, mapping: Path | None, shaper: bool, fake_address: int) -> tuple[str, int]:
+    layer_no = layer_path.name.replace("layer", "")
+    demand_trace = results_dir / f"{topology}_DemandTrace_{layer_no}.trace"
+    ramulator_stdout = results_dir / f"{topology}_RamulatorTrace_{layer_no}.trace"
+    stats_path = results_dir / f"DDR4_{topology}{layer_no}.stats"
+    nreq = write_demand_trace(layer_path, demand_trace, shaper=shaper, fake_address=fake_address)
+    run_ramulator(ramulator_exe, config, demand_trace, stats_path, ramulator_stdout, mapping=mapping)
+    return layer_path.name, nreq
+
+
+def find_layer_paths(results_dir: Path, topology: str, run_name: str) -> list[Path]:
+    # Backward-compatible search order.
+    candidates = [results_dir / topology / run_name, results_dir / run_name]
+    for base in candidates:
+        if base.exists():
+            layers = sorted(p for p in base.iterdir() if p.is_dir() and p.name.startswith("layer"))
+            if layers:
+                return layers
+    raise FileNotFoundError(f"No SCALE-Sim layer trace directories found under: {candidates}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-topology", default="", help="Topology/result prefix used by older scripts")
+    parser.add_argument("-run_name", default="GoogleTPU_v1_ws", help="SCALE-Sim run_name directory")
+    parser.add_argument("-results-dir", default="results")
+    parser.add_argument("-ramulator", default="ramulator/ramulator")
+    parser.add_argument("-ramulator-config", default="ramulator/configs/DDR4-config.cfg")
+    parser.add_argument("-mapping", default="")
+    parser.add_argument("-jobs", type=int, default=1)
+    parser.add_argument("-shaper", type=parse_bool, default=False)
+    parser.add_argument("-fake-address", type=int, default=40000000)
+    args = parser.parse_args()
+
+    root = Path.cwd()
+    results_dir = (root / args.results_dir).resolve()
+    topology = args.topology or "default"
+    ramulator_exe = (root / args.ramulator).resolve()
+    ramulator_config = (root / args.ramulator_config).resolve()
+    mapping = (root / args.mapping).resolve() if args.mapping else None
+
+    if not ramulator_exe.exists():
+        raise FileNotFoundError(f"Ramulator executable not found: {ramulator_exe}. Build it with `make -C ramulator -j`.")
+    if not ramulator_config.exists():
+        raise FileNotFoundError(f"Ramulator config not found: {ramulator_config}")
+
+    layers = find_layer_paths(results_dir, args.topology, args.run_name)
+    print(f"Found {len(layers)} layer trace directories")
+
+    jobs = max(1, args.jobs)
+    if jobs == 1:
+        for layer in layers:
+            name, nreq = process_layer(layer, topology, results_dir, ramulator_exe, ramulator_config, mapping, args.shaper, args.fake_address)
+            print(f"{name}: wrote and simulated {nreq} requests")
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            futs = [ex.submit(process_layer, layer, topology, results_dir, ramulator_exe, ramulator_config, mapping, args.shaper, args.fake_address) for layer in layers]
+            for fut in as_completed(futs):
+                name, nreq = fut.result()
+                print(f"{name}: wrote and simulated {nreq} requests")
+    return 0
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-topology', metavar='Topology file', type=str,
-                        default="",
-                        help="Directory path for the layers"
-                        )
-    parser.add_argument('-run_name', metavar='Config run name', type=str,
-                        default="GoogleTPU_v1_ws",
-                        help="Directory path for the layers"
-                        )
-    parser.add_argument('-shaper', metavar='Memory shaping logic', type=bool,
-                        default=False,
-                        help="Enable fake transactions"
-                        )
-
-
-    args = parser.parse_args()
-    topology = args.topology
-    run = args.run_name
-    shaper = args.shaper
-    layers_path = []
-    if not os.listdir(resultsPath+topology):
-        assert "Generate DRAM demand transactions before running Ramulator"
-    filepath = resultsPath+topology+'/'+run+'/'
-    for file in os.listdir(filepath):
-        if file.startswith('layer') and os.path.isdir(filepath+file):
-            layers_path.append(filepath+file)
-    print(layers_path)
-    #worker(layers_path[0],topology,run,shaper)
-    for layer_path in layers_path:
-        p = mp.Process(target=worker, args=(layer_path, topology, shaper))
-        p.start()
+    raise SystemExit(main())

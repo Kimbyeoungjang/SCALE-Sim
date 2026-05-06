@@ -15,29 +15,29 @@ git checkout dev-ramulator-merge <br />
 python -m venv ./venv <br />
 source venv/bin/activate <br />
 pip install -r ./requirements.txt<br />
->>>>>>> 2401db77f7ea13df54c01df2d41263e1f62edf6c
-
 ### * Step 1b: Create a virtual environment and install python dependencies*
 python -m venv ./venv <br />
 source venv/bin/activate <br />
 pip install -r ./requirements.txt<br />
 
-### * Step 1c: Installing the ramulator package*
+### * Step 1c: Build the vendored Ramulator package*
 
-# Get the latest source from ramulator github
-git submodule update --init --recursive<br />
+Ramulator is now included directly in this SCALE-Sim repository under `ramulator`. It is not a Git submodule anymore, so do not run `git submodule update` for Ramulator.
 
-# Copy the patch files to the ramulator codebase 
-cd submodules<br />
-cp ../scripts/ramulator_patch/* ./ramulator/<br />
+Build it with:
 
-# Build ramulator
-cd ramulator<br />
-make -j <num_jobs><br />
+```bash
+python3 scripts/build_ramulator.py --jobs 8
+```
 
-### Run the SCALE-Sim simulator with cycle-accurate memory requests
+or manually:
 
-After this step, you will have a ramulator executable in the ./ramulator folder which will be used to simulate the memory.
+```bash
+cd ramulator
+make -j8
+```
+
+After this step, you will have a Ramulator executable at `ramulator/ramulator` which will be used to simulate the memory.
 The ramulator integration is a multi-step process, where we need to first generate the demand trace by running the SCALE-Sim without any memory stalls. 
 Next, the demand trace is fed to the Ramulator. Each memory request is tagged with an arrival time, based on when the request is sent to the Ramulator.
 The Ramulator reports the response time of each individual requests. The memory round-trip time is saved in a numpy file.

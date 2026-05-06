@@ -359,7 +359,6 @@ class read_buffer:
                   while not self.active_buffer_hit(addr):
                       self.new_prefetch()
                       potential_stall_cycles = self.last_prefetch_cycle - (cycle + offset)
-                      offset += potential_stall_cycles        # Offset increments if there were potential stalls
                       if potential_stall_cycles > 0:
                           offset += potential_stall_cycles
                     
@@ -387,12 +386,11 @@ class read_buffer:
             num_lines = self.fetch_matrix.shape[0]
 
         requested_data_size = num_lines * self.req_gen_bandwidth
-        self.num_access += requested_data_size
 
         start_idx = 0
         end_idx = num_lines
 
-        prefetch_requests = self.fetch_matrix[start_idx:end_idx, :]
+        prefetch_requests = self.fetch_matrix[start_idx:end_idx, :].copy()
 
         # 1.1 See if extra requests are made, if so nullify them
         self.next_col_prefetch_idx = 0
@@ -404,6 +402,7 @@ class read_buffer:
                 prefetch_requests[row][col] = -1
 
         # TODO: Tally and check if this agrees with the contents of the hashed buffer
+        self.num_access += int(np.count_nonzero(prefetch_requests != -1))
 
         # 2. Preparing the cycles array
         #    The start_cycle variable ensures that all the requests have been made before any
@@ -420,7 +419,7 @@ class read_buffer:
 
         # 4. Update the variables
         #self.last_prefetch_cycle = int(response_cycles_arr[-1][0])
-        self.last_prefetch_cycle = int(max(response_cycles_arr))
+        self.last_prefetch_cycle = int(np.max(response_cycles_arr))
 
         # Update the trace matrix
         self.trace_matrix = np.column_stack((response_cycles_arr, prefetch_requests))
@@ -443,7 +442,7 @@ class read_buffer:
             # Some elements in the current idx is left out in this case
             self.next_line_prefetch_idx = num_lines % self.fetch_matrix.shape[0]
         else:
-            self.next_line_prefetch_idx = (num_lines + 1) % self.fetch_matrix.shape[0]
+            self.next_line_prefetch_idx = num_lines % self.fetch_matrix.shape[0]
 
         return (self.last_prefetch_cycle - cycles_arr[-1][0] - 1)   
     #
@@ -476,18 +475,17 @@ class read_buffer:
         num_lines = math.ceil(self.prefetch_buf_size / self.req_gen_bandwidth)
         end_idx = start_idx + num_lines
         requested_data_size = num_lines * self.req_gen_bandwidth
-        self.num_access += requested_data_size
 
         # In case we need to circle back
         if end_idx > self.fetch_matrix.shape[0]:
             last_idx = self.fetch_matrix.shape[0]
-            prefetch_requests = self.fetch_matrix[start_idx:,:]
+            prefetch_requests = self.fetch_matrix[start_idx:,:].copy()
 
             new_end_idx = min(end_idx - last_idx, start_idx) # In case the entire array is engulfed
             prefetch_requests = \
                 np.concatenate((prefetch_requests, self.fetch_matrix[:new_end_idx,:]))
         else:
-            prefetch_requests = self.fetch_matrix[start_idx:end_idx, :]
+            prefetch_requests = self.fetch_matrix[start_idx:end_idx, :].copy()
 
         # Modify the prefetch request to drop unwanted addresses
         # a. Chomp the elements in the first line included in previous fetches
@@ -500,6 +498,8 @@ class read_buffer:
             row = prefetch_requests.shape[0] - 1
             for col in range(valid_cols, self.req_gen_bandwidth):
                 prefetch_requests[row][col] = -1
+
+        self.num_access += int(np.count_nonzero(prefetch_requests != -1))
 
         # 3. Create the request cycles
         cycles_arr = np.zeros((num_lines, 1))
@@ -523,9 +523,9 @@ class read_buffer:
 
         # Set the line to be prefetched next
         if requested_data_size > self.active_buf_size:
-            self.next_line_prefetch_idx = num_lines % self.fetch_matrix.shape[0]
+            self.next_line_prefetch_idx = (start_idx + num_lines) % self.fetch_matrix.shape[0]
         else:
-            self.next_line_prefetch_idx = (num_lines + 1) % self.fetch_matrix.shape[0]
+            self.next_line_prefetch_idx = (start_idx + num_lines) % self.fetch_matrix.shape[0]
 
         # This does not need to return anything
 

@@ -82,14 +82,15 @@ class read_port:
             out_cycles_arr = incoming_cycles_arr + self.latency
             return out_cycles_arr
 
-        updated_req_timestamp = incoming_cycles_arr[0]
+        incoming_cycles = incoming_cycles_arr.reshape(-1)
+        updated_req_timestamp = incoming_cycles[0]
         out_cycles_arr = np.zeros(incoming_requests_arr_np.shape[0])
-        for i in range(len(incoming_cycles_arr)):
-            out_cycles_arr[i] = incoming_cycles_arr[i] + self.stall_cycles + self.find_latency()
+        for i in range(len(incoming_cycles)):
+            out_cycles_arr[i] = incoming_cycles[i] + self.stall_cycles + self.find_latency()
             #print(str(incoming_cycles_arr[i]) + ' ' + str(out_cycles_arr[i]) + ' ' +str(self.stall_cycles))
             self.request_array.append(out_cycles_arr[i])
             if len(self.request_array) == self.request_queue_size:
-                updated_req_timestamp = incoming_cycles_arr[i] + self.stall_cycles
+                updated_req_timestamp = incoming_cycles[i] + self.stall_cycles
                 self.request_array.sort()
                 if self.request_array[0] >= updated_req_timestamp:
                     self.stall_cycles += self.request_array[0] - updated_req_timestamp
@@ -107,4 +108,4 @@ class read_port:
                 #print(f"stall cycle: {self.stall_cycles}. request array: {self.request_array[0]} updated_req_timestamp: {updated_req_timestamp}")
         
         self.stall_cycles=0
-        return out_cycles_arr
+        return out_cycles_arr.reshape((out_cycles_arr.shape[0], 1))

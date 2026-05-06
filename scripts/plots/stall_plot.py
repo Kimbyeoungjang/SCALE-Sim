@@ -62,8 +62,8 @@ if __name__ =="__main__":
 
     run_folder = os.getcwd() + '/Exp2/stall_cycles'
     for i in range(len(benchmark)):
-        if not os.listdir(run_folder):
-            assert "The run folder does not exist"
+        if not os.path.isdir(run_folder) or not os.listdir(run_folder):
+            raise FileNotFoundError(f"The run folder does not exist: {run_folder}")
         for file in os.listdir(run_folder):
             if file.endswith('stall_out'):
                 name = file.replace('_stall_out','')
@@ -75,6 +75,5 @@ if __name__ =="__main__":
                 filepath = run_folder + '/' + reportFile[(index.lower(),size)]
                 file_extraction(filepath, index.lower(), size)
     plot_bw()
-
 
 

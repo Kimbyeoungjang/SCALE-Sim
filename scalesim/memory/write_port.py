@@ -72,7 +72,6 @@ class write_port:
             return out_cycles_arr_np
 
         updated_req_timestamp = incoming_cycles_arr_np[0][0]
-        print(updated_req_timestamp)
         out_cycles_arr = np.zeros(incoming_cycles_arr_np.shape[0])
         for i in range(len(incoming_cycles_arr_np)):
             out_cycles_arr[i] = incoming_cycles_arr_np[i][0] + self.stall_cycles + self.find_latency()
@@ -88,7 +87,6 @@ class write_port:
                     index = bisect_left(self.request_array,updated_req_timestamp)
                     if index == len(self.request_array):
                         self.request_array = []
-                        print("Empty array")
                     else:
                         self.request_array = self.request_array[index:]
             elif len(self.request_array) > self.request_queue_size:
@@ -98,4 +96,4 @@ class write_port:
         #    self.stall_cycles = 0
 
         self.stall_cycles =0
-        return out_cycles_arr
+        return out_cycles_arr.reshape((out_cycles_arr.shape[0], 1))
